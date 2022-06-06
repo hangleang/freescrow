@@ -6,8 +6,10 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@kleros/erc-792/contracts/IArbitrable.sol";
 import "@kleros/erc-792/contracts/IArbitrator.sol";
 
+import "./interfaces/IFreescrow.sol";
+
 // solhint-disable not-rely-on-time
-contract Freescrow is Context, IArbitrable {
+contract Freescrow is Context, IArbitrable, IFreescrow {
   using SafeMath for uint256;
 
   enum State {
@@ -25,10 +27,15 @@ contract Freescrow is Context, IArbitrable {
     WorkRejected,
     /// Client has been verified the work, Payment has been settled from contract to freelancer.
     VerifiedAndPaymentSettled,
+    /// Arbitration fee deposited by either party.
+    FeeDeposited,
     /// Dispute has been created.
-    Disputed,
-    /// Project has been closed, in case no bidding after auction.
-    Closed
+    DisputeCreated,
+    /// Dispute has been resolved.
+    Resolved,
+    /// Project has been closed and funds has been reclaimed by client,
+    /// in case no bidding after auction or no work delivered after deadline.
+    ReclaimNClosed
   }
 
   struct Bid {
@@ -44,37 +51,44 @@ contract Freescrow is Context, IArbitrable {
     /// ninimum for bid allowance
     uint256 minBid;
     /// timestamp of start auction
-    uint256 startAt;
+    uint256 startedAt;
     /// timestamp of end auction
     uint256 endAt;
   }
 
   // Arbitration
-  enum Party {
-    None, // 0: split and send project fund equally to both parties (NOTES: bid deposit send to freelancer)
-    Client, // 1: settle all product fund + bid deposit to client
-    Freelancer // 2: 1: settle all product fund + bid deposit to freelancer
+  enum RulingOption {
+    /// split and send project fund equally to both parties (NOTES: bid deposit send to freelancer)
+    RefusedToArbitrate, 
+    /// settle all project fund + bid deposit to client
+    Client, 
+    /// settle all project fund + bid deposit to freelancer
+    Freelancer 
   }
 
   enum Resolution {
-    None,
-    DisputeCreated,
+    Executed,
+    TimeoutByClient,
+    TimeoutByFreelancer,
     RulingEnforced,
-    Resolved
+    SettlementReached
   }
 
   struct Dispute {
     uint256 disputeID;
-    Party ruling;
+    uint256 clientFee; // Total fees paid by the client.
+    uint256 freelancerFee; // Total fees paid by the freelancer.
+    RulingOption ruling;
+    uint256 lastInteraction;
   }
 
-  /// maximum verification delay from client before fund can be release to freelancer
-  uint256 public constant MAX_VERIFY_DELAY_IN_SECONDS = 2 days;
+  /// maximum verification period from client before fund can be release to freelancer
+  uint256 public constant MAX_VERIFY_PERIOD = 2 days;
   /// title of freelance project
   string public title;
   /// some description goes here
   string public description;
-  /// client address
+  /// client address or project owner
   address payable public client = payable(_msgSender());
   /// freelancer address
   address payable public freelancer;
@@ -83,10 +97,10 @@ contract Freescrow is Context, IArbitrable {
   /// state of payment
   State public state = State.Initialized;
   /// timestamp of start working on project
-  uint256 public startAt;
+  uint256 public startedAt;
   /// timestamp of comfirm delivered project
-  uint256 public deliverAt;
-  /// timestamp of project deadline (startAt + duration), can extend a delay with penaty
+  uint256 public deliveredAt;
+  /// timestamp of project deadline (startedAt + duration), can extend a delay with penaty
   uint256 public deadline;
   /// project duration in seconds
   uint256 public immutable durationInSeconds;
@@ -96,27 +110,26 @@ contract Freescrow is Context, IArbitrable {
   Auction public auction;
 
   // Arbitration
-  uint8 public constant AMOUNT_OF_CHOICES = 2;
-  uint256 public immutable feeDepositTimeout;
+  uint8 public constant NUM_OF_CHOICES = 2;
+  uint256 public immutable arbitrationFeeDepositPeriod;
   IArbitrator public immutable arbitrator;
   bytes public arbitratorExtraData;
   Dispute public dispute;
-  Resolution public resolution;
 
   constructor(
     string memory _title,
     string memory _description,
+    uint256 _durationInSeconds,
     IArbitrator _arbitrator,
     bytes memory _arbitratorExtraData,
-    uint256 _feeDepositTimeout,
-    uint256 _durationInSeconds
+    uint256 _arbitrationFeeDepositPeriod
   ) checkDuration(_durationInSeconds) {
     title = _title;
     description = _description;
+    durationInSeconds = _durationInSeconds;
     arbitrator = _arbitrator;
     arbitratorExtraData = _arbitratorExtraData;
-    feeDepositTimeout = _feeDepositTimeout;
-    durationInSeconds = _durationInSeconds;
+    arbitrationFeeDepositPeriod = _arbitrationFeeDepositPeriod;
   }
 
   receive() external payable {
@@ -146,7 +159,7 @@ contract Freescrow is Context, IArbitrable {
   {
     require(_minBid < fund, "minimum bid is over project fund, auction can not start");
     auction.minBid = _minBid;
-    auction.startAt = block.timestamp;
+    auction.startedAt = block.timestamp;
     auction.endAt = block.timestamp.add(auctionDuration);
     state = State.AuctionStarted;
   }
@@ -165,7 +178,7 @@ contract Freescrow is Context, IArbitrable {
     auction.bids.push(Bid({participant: _msgSender(), amount: bidAmount}));
   }
 
-  function endAuction(uint256 _startAt)
+  function endAuction(uint256 _startedAt)
     external
     isClientOrFreelancer
     inState(State.AuctionStarted)
@@ -175,12 +188,12 @@ contract Freescrow is Context, IArbitrable {
       state = State.PaymentInHold;
     } else {
       require(
-        _startAt == 0 || _startAt >= block.timestamp,
+        _startedAt == 0 || _startedAt >= block.timestamp,
         "start project can not before current timestamp"
       );
-      if (_startAt == 0) _startAt = block.timestamp;
-      startAt = _startAt;
-      deadline = _startAt.add(durationInSeconds);
+      if (_startedAt == 0) _startedAt = block.timestamp;
+      startedAt = _startedAt;
+      deadline = _startedAt.add(durationInSeconds);
       (address winner, uint256 amount) = getLastBid();
       freelancer = payable(winner);
       highestBid = amount;
@@ -188,25 +201,18 @@ contract Freescrow is Context, IArbitrable {
     }
   }
 
-  function closeProject() external onlyClient inState(State.PaymentInHold) {
-    // require(block.timestamp >= auction.endAt, "no yet, be patient");
-    // require(auction.bids.length == 0, "");
-    state = State.Closed;
-    client.transfer(fund);
-  }
-
   function confirmDelivered() external onlyFreelancer inState(State.AuctionCompleted) {
     // check if current timestamp is before deadline of the project
-    require(block.timestamp <= deadline, "project has been reached deadline!");
+    require(block.timestamp < deadline, "project has been reached deadline!");
     // freelancer delivered the work and confirmed the project has been done.
-    deliverAt = block.timestamp; // halt payment window countdown
+    deliveredAt = block.timestamp; // halt payment window countdown
     // then mark as WorkDelivered state
     state = State.WorkDelivered;
   }
 
   function verifyDelivered() external onlyClient inState(State.WorkDelivered) inVerifyDeadline {
     // client verified the project done and satisfied the work,
-    // then settle project fund, highestBid to freelancer,
+    // then settle project fund + deposit bid to freelancer,
     _settlePayment();
   }
 
@@ -219,25 +225,92 @@ contract Freescrow is Context, IArbitrable {
     _settlePayment();
   }
 
-  function claimPayment() external onlyFreelancer inState(State.WorkDelivered) {
-    uint256 verifyDeadline = deliverAt.add(MAX_VERIFY_DELAY_IN_SECONDS);
-    require(block.timestamp > verifyDeadline, "oop! not yet, be patient");
+  function claimPayment() external inState(State.WorkDelivered) {
+    require(block.timestamp - deliveredAt >= MAX_VERIFY_PERIOD, "oop! not yet, be patient");
     _settlePayment();
   }
 
-  function 
-
-  function rule(uint256 _disputeID, uint256 _ruling) external override onlyArbitrator {
-    require(_ruling <= uint256(AMOUNT_OF_CHOICES), "invalid ruling.");
-
-    dispute = Dispute({
-      disputeID: _disputeID,
-      ruling: Party(_ruling)
-    });
-    require(dispute.disputeID == 0, "dispute already been solved.");
+  function reclaimFunds() external inState(State.AuctionCompleted) {
+    require(block.timestamp >= deadline, "project not yet reach deadline.");
+    _reclaimFunds();
   }
 
-  function createDispute() external isClientOrFreelancer {}
+  function closeProject() public onlyClient inState(State.PaymentInHold) {
+    // require(block.timestamp >= auction.endAt, "no yet, be patient");
+    // require(auction.bids.length == 0, "");
+    _reclaimFunds();
+  }
+
+  // Dispute procedure
+
+  function depositArbitrationFee() external payable isClientOrFreelancer {
+    require(
+      state == State.WorkRejected || state == State.FeeDeposited, 
+      "unexpected status!"
+    );
+    uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
+    if (state == State.FeeDeposited) {
+      require(block.timestamp - dispute.lastInteraction < arbitrationFeeDepositPeriod, "deposit arbitration fee timeout! waiting other party to claim the fund.");
+    }
+
+    if (_msgSender() == client) {
+      dispute.clientFee += msg.value;
+      require(dispute.clientFee >= arbitrationCost, "insufficient deposit fee");
+    } else {
+      dispute.freelancerFee += msg.value;
+      require(dispute.freelancerFee >= arbitrationCost, "insufficient deposit fee");
+    }
+    dispute.lastInteraction = block.timestamp;
+
+    if (dispute.clientFee >= arbitrationCost && dispute.freelancerFee >= arbitrationCost) {
+      raiseDispute(arbitrationCost);
+    } else {
+      state = State.FeeDeposited;
+    }
+  }
+
+  function timeOut() external inState(State.FeeDeposited) {
+    require(block.timestamp - dispute.lastInteraction >= arbitrationFeeDepositPeriod, "timeout has not passed yet!");
+
+    uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
+    uint256 clientSettlementAmount = 0;
+    uint256 freelancerSettlementAmount = 0;
+
+    if (dispute.clientFee >= arbitrationCost) {
+      clientSettlementAmount = fund.add(dispute.clientFee).add(highestBid);
+    } else if (dispute.clientFee != 0) {
+      clientSettlementAmount = dispute.clientFee;
+    }
+
+    if (dispute.freelancerFee >= arbitrationCost) {
+      freelancerSettlementAmount = fund.add(dispute.freelancerFee).add(highestBid);
+    } else if (dispute.freelancerFee != 0) {
+      freelancerSettlementAmount = dispute.freelancerFee;
+    }
+
+    _resolvePayment(clientSettlementAmount, freelancerSettlementAmount);
+  }
+
+  function rule(uint256 _disputeID, uint256 _ruling) external override onlyArbitrator inState(State.DisputeCreated) {
+    require(_ruling <= uint256(NUM_OF_CHOICES), "invalid ruling.");
+    require(dispute.disputeID == _disputeID, "dispute does not exist.");
+    dispute.ruling = RulingOption(_ruling);
+
+    uint256 clientSettlementAmount = 0;
+    uint256 freelancerSettlementAmount = 0;
+    if (dispute.ruling == RulingOption.Client) {
+      clientSettlementAmount = fund.add(dispute.clientFee).add(highestBid);
+    } else if (dispute.ruling == RulingOption.Freelancer) {
+      freelancerSettlementAmount = fund.add(dispute.freelancerFee).add(highestBid);
+    } else {
+      uint256 splitAmount = uint256(fund.add(dispute.clientFee).add(dispute.freelancerFee).add(highestBid)).div(2);
+      clientSettlementAmount = splitAmount;
+      freelancerSettlementAmount = splitAmount;
+    }
+
+    _resolvePayment(clientSettlementAmount, freelancerSettlementAmount);
+    emit Ruling(arbitrator, _disputeID, _ruling);
+  }
 
   // View function
 
@@ -259,7 +332,51 @@ contract Freescrow is Context, IArbitrable {
     return (bid.participant, bid.amount);
   }
 
-  // Private function
+  function remainingAuctionPeriod() public view inState(State.AuctionStarted) returns (uint256) {
+    return block.timestamp > auction.endAt
+      ? 0
+      : (auction.endAt - block.timestamp);
+  }
+
+  function remainingVerifyPeriod() public view inState(State.WorkDelivered) returns (uint256) {
+    return (block.timestamp - deliveredAt) > MAX_VERIFY_PERIOD
+      ? 0
+      : (deliveredAt + MAX_VERIFY_PERIOD - block.timestamp);
+  }
+
+  function remainingDepositFeePeriod() public view returns (uint256) {
+    require(dispute.lastInteraction > 0, "not count yet");
+    return (block.timestamp - dispute.lastInteraction) > arbitrationFeeDepositPeriod
+      ? 0
+      : (dispute.lastInteraction + arbitrationFeeDepositPeriod - block.timestamp);
+  }
+
+  // Private & Internal function
+
+  function raiseDispute(uint256 _arbitrationCost) internal {
+    dispute.disputeID = arbitrator.createDispute{ value: _arbitrationCost }(
+      NUM_OF_CHOICES,
+      arbitratorExtraData
+    );
+
+    // Refund client if it overpaid
+    uint256 extraClientFee = 0;
+    if (dispute.clientFee > _arbitrationCost) {
+      extraClientFee = dispute.clientFee - _arbitrationCost;
+      dispute.clientFee = _arbitrationCost;
+    } 
+
+    // Refund freelancer if it overpaid
+    uint256 extraFreelancerFee = 0;
+    if (dispute.freelancerFee > _arbitrationCost) {
+      extraFreelancerFee = dispute.freelancerFee - _arbitrationCost;
+      dispute.freelancerFee = _arbitrationCost;
+    } 
+
+    state = State.DisputeCreated;
+    if (extraClientFee > 0) client.transfer(extraClientFee);
+    if (extraFreelancerFee > 0) freelancer.transfer(extraFreelancerFee);
+  }
 
   function _settlePayment() private {
     // settle project fund + highestBid to freelancer,
@@ -271,10 +388,32 @@ contract Freescrow is Context, IArbitrable {
     freelancer.transfer(totalFunds);
   }
 
+  function _reclaimFunds() private {
+    fund = 0;
+    highestBid = 0;
+    // then mark as Reclaimed and Closed state
+    state = State.ReclaimNClosed;
+    client.transfer(address(this).balance);
+  }
+
+  function _resolvePayment(uint256 clientSettlementAmount, uint256 freelancerSettlementAmount) private {
+    dispute.clientFee = 0;
+    dispute.freelancerFee = 0;
+    fund = 0;
+    highestBid = 0;
+    state = State.Resolved;
+
+    if (clientSettlementAmount != 0) client.transfer(clientSettlementAmount);
+    if (freelancerSettlementAmount != 0) freelancer.transfer(freelancerSettlementAmount);
+  }
+
   // Modifiers (middleware)
 
   modifier onlyClient() {
-    require(_msgSender() == client, "access denied!");
+    // require(_msgSender() == client, "access denied!");
+    if (_msgSender() != client) {
+      revert AccessDenied(_msgSender(), client);
+    }
     _;
   }
 
@@ -317,9 +456,7 @@ contract Freescrow is Context, IArbitrable {
   }
 
   modifier inVerifyDeadline() {
-    // check if current timestamp is before (deliverAt + max_verify_delay)
-    uint256 verifyDeadline = deliverAt.add(MAX_VERIFY_DELAY_IN_SECONDS);
-    require(block.timestamp <= verifyDeadline, "verification has been reached deadline!");
+    require(block.timestamp - deliveredAt <= MAX_VERIFY_PERIOD, "verification has been reached deadline!");
     _;
   }
 }
