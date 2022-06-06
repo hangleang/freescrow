@@ -410,7 +410,6 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   // Modifiers (middleware)
 
   modifier onlyClient() {
-    // require(_msgSender() == client, "access denied!");
     if (_msgSender() != client) {
       revert AccessDenied(_msgSender(), client);
     }
@@ -418,18 +417,24 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   modifier onlyFreelancer() {
-    require(_msgSender() == freelancer, "access denied!");
+    if (_msgSender() != freelancer) {
+      revert AccessDenied(_msgSender(), freelancer);
+    }
     _;
   }
 
   modifier onlyArbitrator() {
-    require(_msgSender() == address(arbitrator), "the call must be the arbitrator.");
+    if (_msgSender() != address(arbitrator)) {
+      revert AccessDenied(_msgSender(), address(arbitrator));
+    }
     _;
   }
 
   modifier isClientOrFreelancer() {
     if (auction.bids.length == 0) {
-      require(_msgSender() == client, "access denied!");
+      if (_msgSender() != client) {
+        revert AccessDenied(_msgSender(), client);
+      }
     } else {
       require(
         _msgSender() == client ||
@@ -441,7 +446,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   modifier inState(State received) {
-    require(state == received, "unexpected status!");
+    if (state != received) {
+      revert UnexpectedStatus();
+    }
     _;
   }
 
