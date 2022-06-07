@@ -2,10 +2,53 @@
 pragma solidity ^0.8.7;
 
 interface IFreescrow {
-  error UnexpectedStatus();
-  error ReleasedTooEarly();
-  /// access denied! Expected `expected` found `found`.
-  /// @param found address attemp to perform the operation.
+  enum State {
+    /// Escrow has been initialized. waiting for PO deposit fund.
+    Initialized,
+    /// Fund has been deposited into contract. waiting for client to start auction project.
+    PaymentInHold,
+    /// Auction has been started. waiting for bid from freelancers.
+    AuctionStarted,
+    /// Auction has been completed, also Freelancer has been found. start working on the project.
+    AuctionCompleted,
+    /// Work has been delivered. waiting for verify from client.
+    WorkDelivered,
+    /// Work has been rejected, maybe freelancer missing something to deliver.
+    WorkRejected,
+    /// Client has been verified the work, Payment has been settled from contract to freelancer.
+    VerifiedAndPaymentSettled,
+    /// Arbitration fee deposited by either party.
+    FeeDeposited,
+    /// Dispute has been created.
+    DisputeCreated,
+    /// Dispute has been resolved.
+    Resolved,
+    /// Project has been closed and funds has been reclaimed by client,
+    /// in case no bidding after auction or no work delivered after deadline.
+    ReclaimNClosed
+  }
+  
+  /// access denied! Expected `expected`, but found `found`.
   /// @param expected address expected can perform the operation.
-  error AccessDenied(address found, address expected);
+  /// @param found address attemp to perform the operation.
+  error AccessDenied(address expected, address found);
+  /// unexpected status! Expected `expected`, but current state `current`.
+  /// @param expected expected status on this state.
+  /// @param current current status on this state.
+  error UnexpectedStatus(State expected, State current);
+  /// Insufficient balance for transfer. Needed `required` but only
+  /// `available` available.
+  /// @param available balance available.
+  /// @param required requested amount to transfer.
+  error InsufficientBalance(uint256 available, uint256 required);
+  /// invalid given address!
+  error InvalidAddress();
+  /// duration is invalid!
+  error InvalidDuration();
+  /// @param current current timestamp.
+  /// current timestamp `current` has been pass deadline `deadline`!
+  /// @param current current timestamp.
+  /// @param deadline expected deadline.
+  error PassDeadline(uint256 current, uint256 deadline);
+  error ReleasedTooEarly();
 }

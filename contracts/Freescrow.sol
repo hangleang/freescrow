@@ -12,32 +12,6 @@ import "./interfaces/IFreescrow.sol";
 contract Freescrow is Context, IArbitrable, IFreescrow {
   using SafeMath for uint256;
 
-  enum State {
-    /// Escrow has been initialized. waiting for PO deposit fund.
-    Initialized,
-    /// Fund has been deposited into contract. waiting for client to start auction project.
-    PaymentInHold,
-    /// Auction has been started. waiting for bid from freelancers.
-    AuctionStarted,
-    /// Auction has been completed, also Freelancer has been found. start working on the project.
-    AuctionCompleted,
-    /// Work has been delivered. waiting for verify from client.
-    WorkDelivered,
-    /// Work has been rejected, maybe freelancer missing something to deliver.
-    WorkRejected,
-    /// Client has been verified the work, Payment has been settled from contract to freelancer.
-    VerifiedAndPaymentSettled,
-    /// Arbitration fee deposited by either party.
-    FeeDeposited,
-    /// Dispute has been created.
-    DisputeCreated,
-    /// Dispute has been resolved.
-    Resolved,
-    /// Project has been closed and funds has been reclaimed by client,
-    /// in case no bidding after auction or no work delivered after deadline.
-    ReclaimNClosed
-  }
-
   struct Bid {
     // who bid
     address participant;
@@ -79,7 +53,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     uint256 clientFee; // Total fees paid by the client.
     uint256 freelancerFee; // Total fees paid by the freelancer.
     RulingOption ruling;
-    uint256 lastInteraction;
+    uint256 firstDepositFeeAt;
   }
 
   /// maximum verification period from client before fund can be release to freelancer
@@ -210,13 +184,13 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     state = State.WorkDelivered;
   }
 
-  function verifyDelivered() external onlyClient inState(State.WorkDelivered) inVerifyDeadline {
+  function verifyDelivered() external onlyClient inState(State.WorkDelivered) inVerifyPeriod {
     // client verified the project done and satisfied the work,
     // then settle project fund + deposit bid to freelancer,
     _settlePayment();
   }
 
-  function rejectDelivered() external onlyClient inState(State.WorkDelivered) inVerifyDeadline {
+  function rejectDelivered() external onlyClient inState(State.WorkDelivered) inVerifyPeriod {
     state = State.WorkRejected;
   }
 
@@ -250,7 +224,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     );
     uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
     if (state == State.FeeDeposited) {
-      require(block.timestamp - dispute.lastInteraction < arbitrationFeeDepositPeriod, "deposit arbitration fee timeout! waiting other party to claim the fund.");
+      require(block.timestamp - dispute.firstDepositFeeAt < arbitrationFeeDepositPeriod, "deposit arbitration fee timeout! waiting other party to claim the fund.");
     }
 
     if (_msgSender() == client) {
@@ -260,17 +234,17 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       dispute.freelancerFee += msg.value;
       require(dispute.freelancerFee >= arbitrationCost, "insufficient deposit fee");
     }
-    dispute.lastInteraction = block.timestamp;
 
     if (dispute.clientFee >= arbitrationCost && dispute.freelancerFee >= arbitrationCost) {
       raiseDispute(arbitrationCost);
     } else {
+      dispute.firstDepositFeeAt = block.timestamp;
       state = State.FeeDeposited;
     }
   }
 
   function timeOut() external inState(State.FeeDeposited) {
-    require(block.timestamp - dispute.lastInteraction >= arbitrationFeeDepositPeriod, "timeout has not passed yet!");
+    require(block.timestamp - dispute.firstDepositFeeAt >= arbitrationFeeDepositPeriod, "timeout has not passed yet!");
 
     uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
     uint256 clientSettlementAmount = 0;
@@ -345,10 +319,10 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function remainingDepositFeePeriod() public view returns (uint256) {
-    require(dispute.lastInteraction > 0, "not count yet");
-    return (block.timestamp - dispute.lastInteraction) > arbitrationFeeDepositPeriod
+    require(dispute.firstDepositFeeAt > 0, "not count yet");
+    return (block.timestamp - dispute.firstDepositFeeAt) > arbitrationFeeDepositPeriod
       ? 0
-      : (dispute.lastInteraction + arbitrationFeeDepositPeriod - block.timestamp);
+      : (dispute.firstDepositFeeAt + arbitrationFeeDepositPeriod - block.timestamp);
   }
 
   // Private & Internal function
@@ -411,21 +385,21 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
 
   modifier onlyClient() {
     if (_msgSender() != client) {
-      revert AccessDenied(_msgSender(), client);
+      revert AccessDenied(client, _msgSender());
     }
     _;
   }
 
   modifier onlyFreelancer() {
     if (_msgSender() != freelancer) {
-      revert AccessDenied(_msgSender(), freelancer);
+      revert AccessDenied(freelancer, _msgSender());
     }
     _;
   }
 
   modifier onlyArbitrator() {
     if (_msgSender() != address(arbitrator)) {
-      revert AccessDenied(_msgSender(), address(arbitrator));
+      revert AccessDenied(address(arbitrator), _msgSender());
     }
     _;
   }
@@ -433,37 +407,44 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   modifier isClientOrFreelancer() {
     if (auction.bids.length == 0) {
       if (_msgSender() != client) {
-        revert AccessDenied(_msgSender(), client);
+        revert AccessDenied(client, _msgSender());
       }
     } else {
-      require(
-        _msgSender() == client ||
-            _msgSender() == auction.bids[auction.bids.length.sub(1)].participant,
-        "access denied!"
-      );
+      address lastParticipant = auction.bids[auction.bids.length.sub(1)].participant;
+      if (_msgSender() != client) {
+        revert AccessDenied(client, _msgSender());
+      } else if (_msgSender() != lastParticipant) {
+        revert AccessDenied(lastParticipant, _msgSender());
+      }
     }
     _;
   }
 
-  modifier inState(State received) {
-    if (state != received) {
-      revert UnexpectedStatus();
+  modifier inState(State expected) {
+    if (state != expected) {
+      revert UnexpectedStatus(expected, state);
     }
     _;
   }
 
   modifier checkDuration(uint256 duration) {
-    require(duration != 0, "duration is invalid!");
+    if (duration == 0) {
+      revert InvalidDuration();
+    }
     _;
   }
 
   modifier checkAddress(address who) {
-    require(who != address(0), "invalid given address!");
+    if (who == address(0)) {
+      revert InvalidAddress();
+    }
     _;
   }
 
-  modifier inVerifyDeadline() {
-    require(block.timestamp - deliveredAt <= MAX_VERIFY_PERIOD, "verification has been reached deadline!");
+  modifier inVerifyPeriod() {
+    if (block.timestamp - deliveredAt > MAX_VERIFY_PERIOD) {
+      revert PassDeadline(block.timestamp, deliveredAt.add(MAX_VERIFY_PERIOD));
+    }
     _;
   }
 }
