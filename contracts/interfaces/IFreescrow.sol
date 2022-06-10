@@ -45,10 +45,22 @@ interface IFreescrow {
   error InvalidAddress();
   /// duration is invalid!
   error InvalidDuration();
-  /// @param current current timestamp.
   /// current timestamp `current` has been pass deadline `deadline`!
   /// @param current current timestamp.
   /// @param deadline expected deadline.
   error PassDeadline(uint256 current, uint256 deadline);
-  error ReleasedTooEarly();
+  /// current timestamp `current` has not been pass expected timestamp `deadline`!
+  /// @param current current timestamp.
+  /// @param expected expected timestamp.
+  error TooEarly(uint256 current, uint256 expected);
+  /// given input `given` is over maximum: `max`!
+  /// @param given given input.
+  /// @param max expected maximum.
+  error OverMaximum(uint256 given, uint256 max);
+  /// given input `given` is below minimum: `min`!
+  /// @param given given input.
+  /// @param min expected minimum.
+  error BelowMinimum(uint256 given, uint256 min);
+  /// given index is invalid!
+  error InvalidIndex();
 }

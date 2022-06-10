@@ -58,6 +58,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
 
   /// maximum verification period from client before fund can be release to freelancer
   uint256 public constant MAX_VERIFY_PERIOD = 2 days;
+  /// maximum verification period from client before fund can be release to freelancer
+  uint256 public constant MAX_AUCTION_DURATION = 30 days;
   /// title of freelance project
   string public title;
   /// some description goes here
@@ -125,28 +127,39 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     }
   }
 
-  function startAuction(uint256 _minBid, uint256 auctionDuration)
+  function startAuction(uint256 _minBid, uint256 _auctionDuration)
     public
     onlyClient
     inState(State.PaymentInHold)
-    checkDuration(auctionDuration)
+    checkDuration(_auctionDuration)
   {
-    require(_minBid < fund, "minimum bid is over project fund, auction can not start");
+    if (_auctionDuration > MAX_AUCTION_DURATION) {
+      revert OverMaximum(_auctionDuration, MAX_AUCTION_DURATION);
+    }
+    if (_minBid >= fund) {
+      revert OverMaximum(_minBid, fund);
+    }
     auction.minBid = _minBid;
     auction.startedAt = block.timestamp;
-    auction.endAt = block.timestamp.add(auctionDuration);
+    auction.endAt = block.timestamp.add(_auctionDuration);
     state = State.AuctionStarted;
   }
 
   function placeBid() external payable inState(State.AuctionStarted) {
-    require(block.timestamp < auction.endAt, "auction has been ended");
+    if (block.timestamp > auction.endAt) {
+      revert PassDeadline(block.timestamp, auction.endAt);
+    }
     uint256 bidAmount = msg.value;
 
     if (auction.bids.length == 0) {
-      require(bidAmount > auction.minBid, "your bid is lower than minimum bid allowance");
+      if (bidAmount < auction.minBid) {
+        revert BelowMinimum(bidAmount, auction.minBid);
+      }
     } else {
       Bid memory lastBid = auction.bids[auction.bids.length.sub(1)];
-      require(bidAmount > lastBid.amount, "your bid is lower than previous bid");
+      if (bidAmount < lastBid.amount) {
+        revert BelowMinimum(bidAmount, lastBid.amount);
+      }
       payable(lastBid.participant).transfer(lastBid.amount);
     }
     auction.bids.push(Bid({participant: _msgSender(), amount: bidAmount}));
@@ -157,7 +170,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     isClientOrFreelancer
     inState(State.AuctionStarted)
   {
-    require(block.timestamp >= auction.endAt, "oop! no yet, be patient");
+    if (block.timestamp < auction.endAt) {
+      revert TooEarly(block.timestamp, auction.endAt);
+    }
     if (auction.bids.length == 0) {
       state = State.PaymentInHold;
     } else {
@@ -244,7 +259,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function timeOut() external inState(State.FeeDeposited) {
-    require(block.timestamp - dispute.firstDepositFeeAt >= arbitrationFeeDepositPeriod, "timeout has not passed yet!");
+    if (block.timestamp.sub(dispute.firstDepositFeeAt) < arbitrationFeeDepositPeriod) {
+      revert TooEarly(block.timestamp, (dispute.firstDepositFeeAt.add(arbitrationFeeDepositPeriod)));
+    }
 
     uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
     uint256 clientSettlementAmount = 0;
@@ -266,8 +283,13 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function rule(uint256 _disputeID, uint256 _ruling) external override onlyArbitrator inState(State.DisputeCreated) {
-    require(_ruling <= uint256(NUM_OF_CHOICES), "invalid ruling.");
+    if (_ruling > uint256(NUM_OF_CHOICES)) {
+      revert OverMaximum(_ruling, uint256(NUM_OF_CHOICES));
+    }
     require(dispute.disputeID == _disputeID, "dispute does not exist.");
+    if (_disputeID != dispute.disputeID) {
+      revert InvalidIndex();
+    }
     dispute.ruling = RulingOption(_ruling);
 
     uint256 clientSettlementAmount = 0;
@@ -301,7 +323,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function getBid(uint256 idx) public view returns (address participant, uint256 amount) {
-    require(idx < auction.bids.length, "invalid given index!");
+    if (idx >= auction.bids.length) {
+      revert InvalidIndex();
+    }
     Bid memory bid = auction.bids[idx];
     return (bid.participant, bid.amount);
   }
@@ -411,11 +435,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       }
     } else {
       address lastParticipant = auction.bids[auction.bids.length.sub(1)].participant;
-      if (_msgSender() != client) {
-        revert AccessDenied(client, _msgSender());
-      } else if (_msgSender() != lastParticipant) {
-        revert AccessDenied(lastParticipant, _msgSender());
-      }
+      require(_msgSender() == client || _msgSender() == lastParticipant, "access denied!");
     }
     _;
   }
