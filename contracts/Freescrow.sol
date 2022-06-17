@@ -114,7 +114,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
 
   // Mutation function
 
-  function deposit(uint256 _minBid, uint256 auctionDuration)
+  function deposit(uint256 _auctionDuration, uint256 _minBid)
     public
     payable
     onlyClient
@@ -122,12 +122,14 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   {
     fund = fund.add(msg.value);
     state = State.PaymentInHold;
-    if (auctionDuration != 0) {
-      startAuction(_minBid, auctionDuration);
+
+    emit FundDeposited(fund, block.timestamp);
+    if (_auctionDuration != 0) {
+      startAuction(_auctionDuration, _minBid);
     }
   }
 
-  function startAuction(uint256 _minBid, uint256 _auctionDuration)
+  function startAuction(uint256 _auctionDuration, uint256 _minBid)
     public
     onlyClient
     inState(State.PaymentInHold)
@@ -143,6 +145,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     auction.startedAt = block.timestamp;
     auction.endAt = block.timestamp.add(_auctionDuration);
     state = State.AuctionStarted;
+
+    emit AuctionStarted(_auctionDuration, _minBid);
   }
 
   function placeBid() external payable inState(State.AuctionStarted) {
@@ -151,6 +155,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     }
     uint256 bidAmount = msg.value;
 
+    auction.bids.push(Bid({participant: _msgSender(), amount: bidAmount}));
     if (auction.bids.length == 0) {
       if (bidAmount < auction.minBid) {
         revert BelowMinimum(bidAmount, auction.minBid);
@@ -162,7 +167,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       }
       payable(lastBid.participant).transfer(lastBid.amount);
     }
-    auction.bids.push(Bid({participant: _msgSender(), amount: bidAmount}));
+
+    emit BidPlaced(_msgSender(), bidAmount);
   }
 
   function endAuction(uint256 _startedAt)
@@ -176,10 +182,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     if (auction.bids.length == 0) {
       state = State.PaymentInHold;
     } else {
-      require(
-        _startedAt == 0 || _startedAt >= block.timestamp,
-        "start project can not before current timestamp"
-      );
+      if (_startedAt != 0 && _startedAt < block.timestamp) {
+        revert TooEarly(block.timestamp, _startedAt);
+      }
       if (_startedAt == 0) _startedAt = block.timestamp;
       startedAt = _startedAt;
       deadline = _startedAt.add(durationInSeconds);
@@ -188,21 +193,28 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       highestBid = amount;
       state = State.AuctionCompleted;
     }
+
+    emit AuctionEnded();
   }
 
   function confirmDelivered() external onlyFreelancer inState(State.AuctionCompleted) {
     // check if current timestamp is before deadline of the project
-    require(block.timestamp < deadline, "project has been reached deadline!");
+    if (block.timestamp >= deadline) {
+      revert PassDeadline(block.timestamp, deadline);
+    }
     // freelancer delivered the work and confirmed the project has been done.
     deliveredAt = block.timestamp; // halt payment window countdown
     // then mark as WorkDelivered state
     state = State.WorkDelivered;
+
+    emit WorkDeliverd(deliveredAt);
   }
 
   function verifyDelivered() external onlyClient inState(State.WorkDelivered) inVerifyPeriod {
     // client verified the project done and satisfied the work,
     // then settle project fund + deposit bid to freelancer,
     _settlePayment();
+    emit WorkVerified(block.timestamp);
   }
 
   function rejectDelivered() external onlyClient inState(State.WorkDelivered) inVerifyPeriod {
@@ -215,12 +227,17 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function claimPayment() external inState(State.WorkDelivered) {
-    require(block.timestamp - deliveredAt >= MAX_VERIFY_PERIOD, "oop! not yet, be patient");
+    uint256 expected = deliveredAt.add(MAX_VERIFY_PERIOD);
+    if (block.timestamp < expected) {
+      revert TooEarly(block.timestamp, expected);
+    }
     _settlePayment();
   }
 
   function reclaimFunds() external inState(State.AuctionCompleted) {
-    require(block.timestamp >= deadline, "project not yet reach deadline.");
+    if (block.timestamp < deadline) {
+      revert TooEarly(block.timestamp, deadline);
+    }
     _reclaimFunds();
   }
 
@@ -238,16 +255,20 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       "unexpected status!"
     );
     uint256 arbitrationCost = arbitrator.arbitrationCost(arbitratorExtraData);
-    if (state == State.FeeDeposited) {
-      require(block.timestamp - dispute.firstDepositFeeAt < arbitrationFeeDepositPeriod, "deposit arbitration fee timeout! waiting other party to claim the fund.");
+    if (state == State.FeeDeposited && block.timestamp.sub(dispute.firstDepositFeeAt) > arbitrationFeeDepositPeriod) {
+      revert PassDeadline(block.timestamp, dispute.firstDepositFeeAt.add(arbitrationFeeDepositPeriod));
     }
 
     if (_msgSender() == client) {
       dispute.clientFee += msg.value;
-      require(dispute.clientFee >= arbitrationCost, "insufficient deposit fee");
+      if (dispute.clientFee < arbitrationCost) {
+        revert InsufficientDeposit(dispute.clientFee, arbitrationCost);
+      }
     } else {
       dispute.freelancerFee += msg.value;
-      require(dispute.freelancerFee >= arbitrationCost, "insufficient deposit fee");
+      if (dispute.freelancerFee < arbitrationCost) {
+        revert InsufficientDeposit(dispute.freelancerFee, arbitrationCost);
+      }
     }
 
     if (dispute.clientFee >= arbitrationCost && dispute.freelancerFee >= arbitrationCost) {
@@ -286,10 +307,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     if (_ruling > uint256(NUM_OF_CHOICES)) {
       revert OverMaximum(_ruling, uint256(NUM_OF_CHOICES));
     }
-    require(dispute.disputeID == _disputeID, "dispute does not exist.");
-    if (_disputeID != dispute.disputeID) {
-      revert InvalidIndex();
-    }
+    if (_disputeID != dispute.disputeID) revert InvalidIndex();
     dispute.ruling = RulingOption(_ruling);
 
     uint256 clientSettlementAmount = 0;
@@ -343,7 +361,9 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   }
 
   function remainingDepositFeePeriod() public view returns (uint256) {
-    require(dispute.firstDepositFeeAt > 0, "not count yet");
+    if (dispute.firstDepositFeeAt == 0) {
+      revert NotYetDeposited();
+    }
     return (block.timestamp - dispute.firstDepositFeeAt) > arbitrationFeeDepositPeriod
       ? 0
       : (dispute.firstDepositFeeAt + arbitrationFeeDepositPeriod - block.timestamp);
@@ -384,6 +404,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     // then mark as VerifiedAndPaymentSettled state
     state = State.VerifiedAndPaymentSettled;
     freelancer.transfer(totalFunds);
+
+    emit PaymentSettled(totalFunds, freelancer);
   }
 
   function _reclaimFunds() private {

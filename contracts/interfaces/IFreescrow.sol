@@ -36,11 +36,11 @@ interface IFreescrow {
   /// @param expected expected status on this state.
   /// @param current current status on this state.
   error UnexpectedStatus(State expected, State current);
-  /// Insufficient balance for transfer. Needed `required` but only
+  /// Insufficient deposit for perform an operation. Needed `required` but only
   /// `available` available.
   /// @param available balance available.
   /// @param required requested amount to transfer.
-  error InsufficientBalance(uint256 available, uint256 required);
+  error InsufficientDeposit(uint256 available, uint256 required);
   /// invalid given address!
   error InvalidAddress();
   /// duration is invalid!
@@ -63,4 +63,14 @@ interface IFreescrow {
   error BelowMinimum(uint256 given, uint256 min);
   /// given index is invalid!
   error InvalidIndex();
+  /// fee is not yet deposited!
+  error NotYetDeposited();
+
+  event FundDeposited(uint256 fund, uint256 block);
+  event AuctionStarted(uint256 duration, uint256 minBidAllowance);
+  event BidPlaced(address bidder, uint256 bid);
+  event AuctionEnded();
+  event WorkDeliverd(uint256 deliveredAt);
+  event WorkVerified(uint256 block);
+  event PaymentSettled(uint256 amount, address recipient);
 }
