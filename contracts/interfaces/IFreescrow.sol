@@ -68,9 +68,14 @@ interface IFreescrow {
 
   event FundDeposited(uint256 fund, uint256 block);
   event AuctionStarted(uint256 duration, uint256 minBidAllowance);
-  event BidPlaced(address bidder, uint256 bid);
+  event BidPlaced(address indexed bidder, uint256 bid);
   event AuctionEnded();
   event WorkDeliverd(uint256 deliveredAt);
   event WorkVerified(uint256 block);
-  event PaymentSettled(uint256 amount, address recipient);
+  event PaymentSettled(uint256 amount, address indexed recipient);
+  event FundReclaimed(uint256 amount);
+  event PaymentResolved(uint256 clientSettlementAmount, uint256 freelancerSettlementAmount);
+  event DisputeFeeDeposited(address indexed who, uint256 amount);
+  event DisputeFeeTimeout(address indexed who, uint256 when);
+  event DisputeCreated(uint256 when);
 }

@@ -277,6 +277,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       dispute.firstDepositFeeAt = block.timestamp;
       state = State.FeeDeposited;
     }
+
+    emit DisputeFeeDeposited(_msgSender(), msg.value);
   }
 
   function timeOut() external inState(State.FeeDeposited) {
@@ -300,6 +302,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       freelancerSettlementAmount = dispute.freelancerFee;
     }
 
+    emit DisputeFeeTimeout(_msgSender(), block.timestamp);
     _resolvePayment(clientSettlementAmount, freelancerSettlementAmount);
   }
 
@@ -322,8 +325,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
       freelancerSettlementAmount = splitAmount;
     }
 
-    _resolvePayment(clientSettlementAmount, freelancerSettlementAmount);
     emit Ruling(arbitrator, _disputeID, _ruling);
+    _resolvePayment(clientSettlementAmount, freelancerSettlementAmount);
   }
 
   // View function
@@ -394,6 +397,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     state = State.DisputeCreated;
     if (extraClientFee > 0) client.transfer(extraClientFee);
     if (extraFreelancerFee > 0) freelancer.transfer(extraFreelancerFee);
+
+    emit DisputeCreated(block.timestamp);
   }
 
   function _settlePayment() private {
@@ -413,7 +418,10 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     highestBid = 0;
     // then mark as Reclaimed and Closed state
     state = State.ReclaimNClosed;
-    client.transfer(address(this).balance);
+    uint256 amount = address(this).balance;
+    client.transfer(amount);
+
+    emit FundReclaimed(amount);
   }
 
   function _resolvePayment(uint256 clientSettlementAmount, uint256 freelancerSettlementAmount) private {
@@ -425,6 +433,8 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
 
     if (clientSettlementAmount != 0) client.transfer(clientSettlementAmount);
     if (freelancerSettlementAmount != 0) freelancer.transfer(freelancerSettlementAmount);
+
+    emit PaymentResolved(clientSettlementAmount, freelancerSettlementAmount);
   }
 
   // Modifiers (middleware)
