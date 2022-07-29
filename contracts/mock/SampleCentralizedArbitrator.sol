@@ -79,7 +79,7 @@ contract SimpleCentralizedArbitrator is IArbitrator {
         dispute.ruling = _ruling;
         dispute.status = DisputeStatus.Solved;
 
-        payable(msg.sender).send(arbitrationCost(""));
+        payable(msg.sender).transfer(arbitrationCost(""));
         dispute.arbitrated.rule(_disputeID, _ruling);
     }
 

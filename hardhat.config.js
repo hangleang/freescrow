@@ -97,7 +97,7 @@ module.exports = {
   },
   contractSizer: {
     runOnCompile: false,
-    only: ["APIConsumer", "KeepersCounter", "PriceConsumerV3", "RandomNumberConsumer"],
+    only: ["Freescrow", "FreescrowFactory"],
   },
   namedAccounts: {
     deployer: {
@@ -110,6 +110,9 @@ module.exports = {
   },
   solidity: {
     compilers: [
+      {
+        version: "0.8.9",
+      },
       {
         version: "0.8.7",
       },
