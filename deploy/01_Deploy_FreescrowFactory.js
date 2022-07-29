@@ -1,8 +1,8 @@
 const { getNamedAccounts, deployments, network, run } = require("hardhat")
+const { verify } =  require('../helper-functions')
 const {
   developmentChains,
 } = require("../helper-hardhat-config")
-const { verify } = require("../helper-functions")
 
 module.exports = async ({ getNamedAccounts, deployments }) => {
   const { deploy, log } = deployments

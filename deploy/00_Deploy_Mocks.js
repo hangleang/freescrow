@@ -1,4 +1,5 @@
 const { getNamedAccounts, deployments, network } = require("hardhat")
+const { verify } =  require('../helper-functions')
 const {
   developmentChains,
 } = require("../helper-hardhat-config")
@@ -10,11 +11,24 @@ module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
 
   log("----------------------------------------------------")
   log("Deploying Mock Arbitrator...")
-  const mock = await deploy("SimpleCentralizedArbitrator", {
+  const arbitratorMock = await deploy("SimpleCentralizedArbitrator", {
     from: deployer,
     log: true,
     args: [],
-  })
+  });
+  const args = [
+    "sample project",
+    "description",
+    1800,
+    arbitratorMock.address,
+    "0x",
+    1800,
+  ];
+  const freescrowMock = await deploy("Freescrow", {
+    from: deployer,
+    log: true,
+    args: args,
+  });
   log("Mocks Deployed!")
   // log("----------------------------------------------------")
   // log("You are deploying to a local network, you'll need a local network running to interact")
@@ -24,7 +38,8 @@ module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
   // Verify the deployment
   if (!developmentChains.includes(network.name) && process.env.ETHERSCAN_API_KEY) {
     log("Verifying...")
-    await verify(mock.address, [])
+    await verify(arbitratorMock.address, [])
+    await verify(freescrowMock.address, args)
   }
 }
 module.exports.tags = ["all", "mocks"]
