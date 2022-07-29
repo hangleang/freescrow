@@ -93,6 +93,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
   Dispute public dispute;
 
   constructor(
+    address _owner,
     string memory _title,
     string memory _description,
     uint256 _durationInSeconds,
@@ -100,6 +101,7 @@ contract Freescrow is Context, IArbitrable, IFreescrow {
     bytes memory _arbitratorExtraData,
     uint256 _arbitrationFeeDepositPeriod
   ) checkDuration(_durationInSeconds) {
+    client = payable(_owner);
     title = _title;
     description = _description;
     durationInSeconds = _durationInSeconds;

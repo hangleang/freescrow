@@ -10,6 +10,7 @@ contract FreescrowFactory {
     address[] public freescrows;
 
     function create(
+      address _owner,
       string memory _title,
       string memory _description,
       uint256 _durationInSeconds,
@@ -18,6 +19,7 @@ contract FreescrowFactory {
       uint256 _arbitrationFeeDepositPeriod
     ) public returns (address freescrow) {
         freescrow = address(new Freescrow(
+          _owner,
           _title, 
           _description, 
           _durationInSeconds, 
